@@ -3,207 +3,284 @@
 #include "utils.hpp"
 #include "Core.hpp"
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-void ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::reconstruct_elf(Core &coredump)
+//TODO rezolva ceva cu void* intors din core si cu pointerii pasati aiurea
+//TODO ascunde byte_put la fel ca get
+//TODO nu mai plimba mereu pointerii, stocheaza obiectele, ex elf header data
+
+template <typename ElfHdr, typename ElfAddr>
+void ElfBuffer<ElfHdr, ElfAddr>::reconstruct_elf(Core &coredump)
 {
-    bool ret;
-    uint8_t *core = (uint8_t*)(coredump.get_core());
-    auto size = coredump.get_size();
+	bool ret;
+	size_t wbytes;
 
-    if (!core || !size) {
-        DBGE("Empty core or invalid size");
-        return;
-    }
+	uint8_t *core = (uint8_t *)(coredump.get_core());
+	auto size = coredump.get_size();
 
-    /*  Recover ELF header of the original image    */
-    ret = find_original_elf_header(coredump);
-    if (!ret) {
-        DBGE("Could not find ELF original header in CORE segments");
-        return;
-    }
+	if (!core || !size)
+	{
+		DBGE("Empty core or invalid size");
+		return;
+	}
 
-    /*  Dump all segments into a list   */
-    if ((get_elf_header()->e_type) == ET_DYN) {
-        DBGI("Executable is PIE");
-        ret = find_original_segments_pie(coredump);
-    } else 
-        ret = find_original_segments(coredump);
+	/*  Recover ELF header of the original image    */
+	ret = find_original_elf_header(coredump);
+	if (!ret)
+	{
+		DBGE("Could not find ELF original header in CORE segments");
+		return;
+	}
 
-    if (!ret) {
-        DBGE("Could not find original loadable segments");
-        return;
-    }
+	/*  Dump all segments into a list   */
+	auto hdr = get_elf_header();
+	if (hdr.get_e_type() == ET_DYN)
+	{
+		DBGI("Executable is PIE");
+		is_pie = true;
+		ret = find_original_segments_pie(coredump);
+	}
+	else
+		ret = find_original_segments(coredump);
 
-    /*  Assemble segments with headers  */
-    ret = assemble_elf();
-    if (!ret) {
-        DBGE("Could not assemble ELF");
-        return;
-    }
+	if (!ret)
+	{
+		DBGE("Could not find original loadable segments");
+		return;
+	}
 
-    /*  
+	/*  Assemble segments with headers  */
+	ret = assemble_elf();
+	if (!ret)
+	{
+		DBGE("Could not assemble ELF");
+		return;
+	}
+
+	/*  
      *   Do not return if this function fails
      *   ELF might have no dynamic section.
      */
-    ret = patch_binary();
-    if (!ret) {
-        DBGE("Could not patch ELF. It might be corrupted");
-    }
+	ret = patch_binary();
+	if (!ret)
+	{
+		DBGW("Could not patch ELF. Executable might be static");
+	}
 
-    //TODO make proper dump
-    FILE *f = fopen("test.out", "wb");
-    if (!f)
-    {   
-        DBGE("Could not open file");
-        return;
-    }
+	FILE *f = fopen(m_config.output.c_str(), "wb");
+	if (!f)
+	{
+		DBGE("Could not open file");
+		return;
+	}
 
-    fwrite(elf_buffer.data(), elf_buffer.size(), 1, f);
-    fclose(f);
+	wbytes = fwrite(elf_buffer.data(), 1, elf_buffer.size(), f);
+	if (wbytes != elf_buffer.size())
+	{
+		DBGE("Could not write entire ELF to file");
+	}
+
+	DBGI("Successfully wrote output file");
+	fclose(f);
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
+template <typename ElfHdr, typename ElfAddr>
 template <typename Type>
-void ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::modify_address(ElfAddr address, Type value)
+void ElfBuffer<ElfHdr, ElfAddr>::modify_address(ElfAddr address, Type value)
 {
-    ElfHdr *hdr = ELF_CAST(ElfHdr, elf_buffer.data());
-    ElfPhdr* vphdr = ELF_OFFSET_CAST(ElfPhdr, hdr, hdr->e_phoff);
+	ELF::ElfHdrClass<ElfHdr> hdr((ElfHdr *)elf_buffer.data());
+	for (int k = 0; k < hdr.get_e_phnum(); k++)
+	{
+		auto phdr = hdr.get_phdr_at_index(k);
 
-    for (int k =0; k < hdr->e_phnum; k++)
-    {
-        if (vphdr[k].p_type != PT_LOAD)
-            continue;
+		if (phdr.get_p_type() != PT_LOAD)
+			continue;
 
-        if (vphdr[k].p_vaddr <= address && address < vphdr[k].p_vaddr + vphdr[k].p_filesz) 
-        {
-            auto dif = address - vphdr[k].p_vaddr;
-            Type *address_in_elf = ELF_OFFSET_CAST(Type, hdr, vphdr[k].p_offset + dif);
-            DBGI("Patching %p with 0x%x", address_in_elf, value);
-            *address_in_elf = value;
-            return;
-        }
-    }
+		if (phdr.get_p_vaddr() <= address && address < phdr.get_p_vaddr() + phdr.get_p_filesz())
+		{
+			auto dif = address - phdr.get_p_vaddr();
+			Type *address_in_elf = ELF_OFFSET_CAST(Type, hdr.get_raw_ptr(), phdr.get_p_offset() + dif);
+			DBGI("Patching %p with 0x%x", address, value);
+			BYTE_PUT(*address_in_elf, value);
+			return;
+		}
+	}
 
-    DBGE("Failed to find segment for %p", address);
+	DBGE("Failed to find segment for %p", address);
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
+template <typename ElfHdr, typename ElfAddr>
 template <typename ElfDynamic>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::patch_binary()
+bool ElfBuffer<ElfHdr, ElfAddr>::patch_binary_pie()
 {
-    ElfHdr *hdr = ELF_CAST(ElfHdr, elf_buffer.data());
-    hdr->e_shnum = 0;
-    hdr->e_shoff = 0;
-    hdr->e_shstrndx = 0;
+	ElfDynamic *vdyn = nullptr;
+	ELF::ElfHdrClass<ElfHdr> header(elf_buffer.data());
 
-    /*  Searching PT_DYNAMIC Program Header */
-    ElfPhdr* vphdr = ELF_OFFSET_CAST(ElfPhdr, hdr, hdr->e_phoff);
-    int index = -1;
-    for (int i = 0; i < hdr->e_phnum; i++) {
-        if (vphdr[i].p_type == PT_DYNAMIC) {
-            DBGI("Found dynamic section @ %x", vphdr[i].p_offset);
-            index = i;
-            break;
-        }
-    }
+	for (int j = 0;; j++)
+	{
 
-    if (index == -1) {
-        DBGE("Could not find dynamic section");
-        return false;
-    }
+		auto dphdr = ELF::ElfDynClass<ElfHdr>(header.get_dynamic_section_at_index(j));
 
-    /*  Looking up for PLTGOT   */
-    ElfDynamic *vdyn = ELF_OFFSET_CAST(ElfDynamic, hdr, vphdr[index].p_offset);
-    index = -1;
-
-    for (int j = 0;; j++) {
-        if (vdyn[j].d_tag == DT_NULL) {
-            DBGE("Could not find PLTGOT");
-            break;
-        }
-
-        if (vdyn[j].d_tag == DT_PLTGOT) {
-            DBGI("Found PLTGOT @ %p", vdyn[j].d_un.d_ptr);
-            index = j;
-            break;
-        }
-    }
-
-    if (index == -1) {
-        DBGW("Could not find PLTGOT in PT_DYNAMIC")
-        return false;
-    }
-    
-    return true;
-
+		if (!dphdr.get_raw_ptr()) {
+			break;
+		}
+		
+		auto old_value = dphdr.get_d_un_d_ptr();
+		if (old_value > base_address)
+		{
+			DBGI("Patching dynamic section %d, old: %p, new: %p", j, old_value, old_value - base_address);
+			auto dyn_ptr = old_value;
+			dyn_ptr -= base_address;
+			dphdr.set_d_un_d_ptr(dyn_ptr);
+			//BYTE_PUT(vdyn[j].d_un.d_ptr, dyn_ptr);
+		}
+	}
+	return true;
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-ElfHdr* ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::get_elf_header()
+template <typename ElfHdr, typename ElfAddr>
+template <typename ElfDynamic>
+bool ElfBuffer<ElfHdr, ElfAddr>::patch_binary()
 {
-    if (!elf_hdr_bytes.size()) {
-        DBGW("No ELF header.");
-        return nullptr;
-    }
+	int index_got;
+	int index_plt_relsz;
+	int index_relaent;
+	int got_entries_nr = 0;
+	int debug_index;
 
-    return (ElfHdr*)elf_hdr_bytes.data();
+	ElfDynamic *vdyn = nullptr;
+	ElfHdr *hdr = ELF_CAST(ElfHdr, elf_buffer.data());
+	ELF::ElfHdrClass<ElfHdr> header(hdr);
+
+	//header.set_shentsize(0);
+	header.set_shnum(0);
+	header.set_shoff(0);
+	header.set_shstrndx(0);
+
+	// BYTE_PUT(hdr->e_shnum, 0);
+	// BYTE_PUT(hdr->e_shoff, 0);
+	// BYTE_PUT(hdr->e_shstrndx, 0);
+
+	auto debug_ptr = header.get_dynamic_section(DT_DEBUG);
+	ELF::ElfDynClass<ElfHdr> debug_ent(debug_ptr);
+	if (debug_ptr)
+		debug_ent.set_d_un_d_ptr(0);
+
+	auto got_ptr = header.get_dynamic_section(DT_PLTGOT);
+	if (!got_ptr)
+	{
+		DBGW("Could not find PLTGOT in PT_DYNAMIC")
+		return false;
+	}
+
+	if (is_pie)
+		patch_binary_pie();
+
+	// patching GOT[1], GOT[2]
+	ElfAddr got_address = BYTE_GET(((ElfDynamic*)got_ptr)->d_un.d_ptr);
+	//modify_address<ElfAddr>(ADDR2ELF(got_address, 1), 0x0);
+	//modify_address<ElfAddr>(ADDR2ELF(got_address, 2), 0x0);
+
+	for (auto &p : m_config.patches)
+	{
+		modify_address<ElfAddr>(ADDR2ELF(p.first, 0), p.second);
+	}
+
+	auto plt_relsz_ptr = header.get_dynamic_section(DT_PLTRELSZ);
+	if (!plt_relsz_ptr)
+	{
+		plt_relsz_ptr = header.get_dynamic_section(DT_RELASZ);
+		if (!plt_relsz_ptr)
+		{
+			DBGW("Could not find DT_PLTRELSZ in PT_DYNAMIC");
+			return false;
+		}
+	}
+
+	auto relaent_ptr = header.get_dynamic_section(DT_RELAENT);
+	if (!relaent_ptr)
+	{
+		relaent_ptr = header.get_dynamic_section(DT_RELENT);
+		if (!relaent_ptr)
+		{
+			DBGW("Could not find DT_RELENT in PT_DYNAMIC")
+			return false;
+		}
+	}
+
+	ELF::ElfDynClass<ElfHdr> relsz(plt_relsz_ptr);
+	ELF::ElfDynClass<ElfHdr> relaent(relaent_ptr);
+
+	got_entries_nr = relsz.get_d_un_d_ptr() / relaent.get_d_un_d_ptr();
+	DBGI("Found %d PLT/GOT entries, GOT %p", got_entries_nr, ADDR2ELF(got_address, 3));
+	return true;
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-ElfPhdr* ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::get_phdr_table()
+template <typename ElfHdr, typename ElfAddr>
+ELF::ElfHdrClass<ElfHdr> ElfBuffer<ElfHdr, ElfAddr>::get_elf_header()
 {
+	if (!elf_hdr_bytes.size())
+	{
+		DBGW("No ELF header.");
+		return nullptr;
+	}
 
-}
-
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-void ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::add_phdr_segment(char *data, unsigned len, ElfPhdr *phdr)
-{
-
+	return ELF::ElfHdrClass<ElfHdr>((ElfHdr *)elf_hdr_bytes.data());
 }
 
 /*  The original ELF header is usally located in the first PT_LOAD Segment  */
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::find_original_elf_header(Core &coredump)
+template <typename ElfHdr, typename ElfAddr>
+bool ElfBuffer<ElfHdr, ElfAddr>::find_original_elf_header(Core &coredump)
 {
-    int current = 0;
-    unsigned num = coredump.get_phnum<ElfHdr>();
-    for (int i = 0 ; i < num; i++) {
-        auto entry = coredump.get_phdr_at<ElfHdr>(i);
-        if (!entry.first && !entry.second) {
-            DBGW("Invalid entry in get_phdr_at");
-            return false;
-        }
+	int current = 0;
+	unsigned num = coredump.get_phnum<ElfHdr>();
+	for (uint i = 0; i < num; i++)
+	{
+		auto entry = coredump.get_phdr_at<ElfHdr>(i);
+		if (!entry.first && !entry.second)
+		{
+			DBGW("Invalid entry in get_phdr_at");
+			return false;
+		}
 
-        if (entry.first->p_type != PT_LOAD)
-            continue;
+		ELF::ElfPHdrClass<ElfHdr> phdr(entry.first);
 
-        if (!Core::check_eident((uint8_t*)entry.second)) {
-            if (!list)
-                DBGW("Original ELF Header not present in PT_LOAD segment");
-            continue;
-        }
+		if (phdr.get_p_type() != PT_LOAD)
+			continue;
 
-        DBGI("[%d] Found original ELF Header @ %p, vmaddress %p, offset in core %p", current, entry.second, entry.first->p_vaddr, entry.first->p_offset)
-        if (list) {
-            current++;
-            continue;
-        }
-        if (current < this->index) {
-            current++;
-            continue;
-        }
-        ElfHdr *original_header = (ElfHdr*)entry.second;
-        
-        // Size of original elf header + Phdr table.
-        unsigned total_size = original_header->e_phoff + original_header->e_phnum * original_header->e_phentsize;
-        vmaddr_elf_header = entry.first->p_vaddr;
+		if (!Core::check_eident((uint8_t *)entry.second, false))
+		{
+			if (!m_config.list)
+				DBGW("Original ELF Header not present in PT_LOAD segment");
+			continue;
+		}
 
-        elf_hdr_bytes.insert(elf_hdr_bytes.begin(), (uint8_t*)entry.second, (uint8_t*)entry.second + total_size);
-        return true;
-    }
+		DBGI("-[%d] Found original ELF Header @ %p, vmaddress %p, offset in core %p", current, entry.second,
+			 phdr.get_p_vaddr(), phdr.get_p_offset());
 
-    DBGW("Could not recover original ELF Header");
-    return false;
+		if (m_config.list)
+		{
+			current++;
+			continue;
+		}
+
+		if (current < m_config.elf_index)
+		{
+			current++;
+			continue;
+		}
+
+		base_address = phdr.get_p_vaddr();
+		ELF::ElfHdrClass<ElfHdr> original_header((ElfHdr *)entry.second);
+
+		// Size of original elf header + Phdr table.
+		unsigned total_size = original_header.get_e_phoff() + original_header.get_e_phnum() * original_header.get_e_phentsize();
+		vmaddr_elf_header = phdr.get_p_vaddr();
+
+		elf_hdr_bytes.insert(elf_hdr_bytes.begin(), (uint8_t *)original_header.get_raw_ptr(), (uint8_t *)original_header.get_raw_ptr() + total_size);
+		return true;
+	}
+
+	DBGW("Could not recover original ELF Header");
+	return false;
 }
 
 /*  
@@ -215,184 +292,200 @@ bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::find_original_elf_header(Core
     Always take into consideration the size from the original ELF;
 */
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::find_original_segments(Core &coredump)
+template <typename ElfHdr, typename ElfAddr>
+bool ElfBuffer<ElfHdr, ElfAddr>::find_original_segments(Core &coredump)
 {
-    auto elf_hdr = get_elf_header();
-    if (!elf_hdr)
-        return false;
-    
-    unsigned pnum = elf_hdr->e_phnum;
-    unsigned num = coredump.get_phnum<ElfHdr>();
+	auto elf_hdr = get_elf_header();
+	if (!elf_hdr.get_raw_ptr())
+		return false;
 
-    /*  For each original segment we lookup for its dump in the CORE    */
-    ElfPhdr *vphdr = ELF_OFFSET_CAST(ElfPhdr, elf_hdr, elf_hdr->e_phoff);
-    for (int j = 0; j < pnum; j++) {
-        
-        if (vphdr[j].p_type != PT_LOAD)
-            continue;
-        
-        int i = 0;
-        for (i = 0; i < num; i++) {
-            auto entry = coredump.get_phdr_at<ElfHdr>(i);
+	unsigned pnum = elf_hdr.get_e_phnum();
+	unsigned num = coredump.get_phnum<ElfHdr>();
 
-            if (!entry.first && !entry.second) {
-                DBGW("Invalid entry in get_phdr_at");
-                return false;
-            }
+	/*  For each original segment we lookup for its dump in the CORE    */
+	for (uint j = 0; j < pnum; j++)
+	{
 
-            if (entry.first->p_type != PT_LOAD)
-                continue;
+		ELF::ElfPHdrClass<ElfHdr> phdr = elf_hdr.get_phdr_at_index(j);
+		if (phdr.get_p_type() != PT_LOAD)
+			continue;
 
-            if (!(entry.first->p_vaddr <= vphdr[j].p_vaddr &&
-                entry.first->p_memsz + entry.first->p_vaddr > vphdr[j].p_vaddr)) {
-                    continue;
-                }
+		uint i = 0;
+		for (i = 0; i < num; i++)
+		{
+			auto entry = coredump.get_phdr_at<ElfHdr>(i);
+			if (!entry.first && !entry.second)
+			{
+				DBGW("Invalid entry in get_phdr_at");
+				return false;
+			}
 
-            Elf_phdr_chunk<ElfPhdr> chunk;
-            chunk.data = (void*)((uint8_t*)entry.second + ((ElfAddr)vphdr[j].p_vaddr - (ElfAddr)entry.first->p_vaddr ));
-            chunk.core_hdr = entry.first;
-            memcpy(&chunk.original_hdr, &vphdr[j], sizeof(chunk.original_hdr));
+			ELF::ElfPHdrClass<ElfHdr> phdr_core(entry.first);
+			if (phdr_core.get_p_type() != PT_LOAD)
+				continue;
 
-            elf_chunks.push_back(chunk);
-            DBGI("Saved chunk[%d] vaddr %p, memsize %u, filesize %u, data @ %p", elf_chunks.size() - 1, chunk.original_hdr.p_vaddr,
-                                chunk.original_hdr.p_memsz, chunk.original_hdr.p_filesz, chunk.data);
-            break;
-            
-        }
-        if (i == num) {
-            DBGW("Segment not found in core image");
-        }
-    }
+			if (!(phdr_core.get_p_vaddr() <= phdr.get_p_vaddr() &&
+				  phdr_core.get_p_memsz() + phdr_core.get_p_vaddr() > phdr.get_p_vaddr()))
+			{
+				continue;
+			}
 
-    if (!elf_chunks.size()) {
-        DBGW("No PT_LOAD segments found");
-        return false;
-    }
+			Elf_phdr_chunk<ElfHdr> chunk;
+			chunk.data = (void *)((uint8_t *)entry.second + (phdr.get_p_vaddr() - phdr_core.get_p_vaddr()));
+			chunk.core_hdr = phdr_core;
+			chunk.original_hdr = phdr;
+			elf_chunks.push_back(chunk);
+			DBGI("Saved chunk[%d] vaddr %p, memsize %u, filesize %u, data @ %p", elf_chunks.size() - 1, phdr.get_p_vaddr(),
+				 phdr.get_p_memsz(), phdr.get_p_filesz(), chunk.data);
+			break;
+		}
+		if (i == num)
+		{
+			DBGW("Segment not found in core image");
+		}
+	}
 
-    can_assemble = true;
-    return true;
+	if (!elf_chunks.size())
+	{
+		DBGW("No PT_LOAD segments found");
+		return false;
+	}
+
+	can_assemble = true;
+	return true;
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::add_padding(unsigned long long upper_bound)
+template <typename ElfHdr, typename ElfAddr>
+bool ElfBuffer<ElfHdr, ElfAddr>::add_padding(unsigned long long upper_bound)
 {
-    auto current_size = elf_buffer.size();
-    if (upper_bound < current_size) {
-        DBGE("Padding bound is lower than actual size.");
-        return false;
-    }
+	auto current_size = elf_buffer.size();
+	if (upper_bound < current_size)
+	{
+		DBGE("Padding bound is lower than actual size.");
+		return false;
+	}
 
-    auto n = upper_bound - current_size;
-    if (n)
-        DBGI("Padding from 0x%x to 0x%x", current_size, upper_bound)
-    
-    for (int i = 0; i < n; i++) {
-        elf_buffer.push_back(0x42); //padding byte
-    }
+	auto n = upper_bound - current_size;
+	if (n)
+		DBGI("Padding from 0x%x to 0x%x", current_size, upper_bound)
 
-    return true;
+	for (uint i = 0; i < n; i++)
+	{
+		elf_buffer.push_back(0x0); //padding byte
+	}
+
+	return true;
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::assemble_elf()
+template <typename ElfHdr, typename ElfAddr>
+bool ElfBuffer<ElfHdr, ElfAddr>::assemble_elf()
 {
-    bool ret;
-    if (!can_assemble) {
-        DBGW("Cannot assemble ELF");
-        return false;
-    }
+	bool ret;
+	if (!can_assemble)
+	{
+		DBGW("Cannot assemble ELF");
+		return false;
+	}
 
-    /*  Append to buffer the segment which starts with the original ELF header  */
-    for (int i = 0; i < elf_chunks.size(); i++) {
-        if (elf_chunks[i].core_hdr->p_vaddr == vmaddr_elf_header) {
-            auto core_phdr = elf_chunks[i].core_hdr;
-            auto elf_phdr = elf_chunks[i].original_hdr;
-            elf_buffer.insert(elf_buffer.begin(), (uint8_t*)elf_chunks[i].data, (uint8_t*)elf_chunks[i].data + elf_phdr.p_filesz);
-            elf_chunks.erase(elf_chunks.begin() + i);
-            DBGI("Added segment vmaddr %p, memsz %u filesz %u", elf_phdr.p_vaddr,
-                    elf_phdr.p_memsz, elf_phdr.p_filesz);
-        }
-    }
+	/*  Append to buffer the segment which starts with the original ELF header  */
+	for (uint i = 0; i < elf_chunks.size(); i++)
+	{
+		if (elf_chunks[i].core_hdr.get_p_vaddr() == vmaddr_elf_header)
+		{
+			auto elf_phdr = elf_chunks[i].original_hdr;
+			elf_buffer.insert(elf_buffer.begin(), (uint8_t *)elf_chunks[i].data, (uint8_t *)elf_chunks[i].data + elf_phdr.get_p_filesz());
+			elf_chunks.erase(elf_chunks.begin() + i);
+			DBGI("Added segment vmaddr %p, memsz %u filesz %u", elf_phdr.get_p_vaddr(),
+				 elf_phdr.get_p_memsz(), elf_phdr.get_p_filesz());
+		}
+	}
 
-    if (!elf_buffer.size())
-    {
-        DBGW("Could not append ELF header to buffer");
-        return false;
-    }
+	if (!elf_buffer.size())
+	{
+		DBGW("Could not append ELF header to buffer");
+		return false;
+	}
 
-    DBGI("Added ELF Header section: 0x%x bytes", elf_buffer.size());
-    for (int i = 0; i < elf_chunks.size(); i++)
-    {
-        auto c_chunk = elf_chunks[i];
-        ret = add_padding(c_chunk.original_hdr.p_offset);
-        if (!ret)
-            return false;
+	DBGI("Added ELF Header section: 0x%x bytes", elf_buffer.size());
+	for (uint i = 0; i < elf_chunks.size(); i++)
+	{
+		auto c_chunk = elf_chunks[i];
+		ret = add_padding(c_chunk.original_hdr.get_p_offset());
+		if (!ret)
+			return false;
 
-        elf_buffer.insert(elf_buffer.end(), (uint8_t*)c_chunk.data, (uint8_t*)c_chunk.data + c_chunk.original_hdr.p_filesz);
-        DBGI("Added segment vmaddr %p, memsz %u filesz %u", c_chunk.original_hdr.p_vaddr,
-                    c_chunk.original_hdr.p_memsz, c_chunk.original_hdr.p_filesz);
-    }
-    return true;
+		elf_buffer.insert(elf_buffer.end(), (uint8_t *)c_chunk.data, (uint8_t *)c_chunk.data + c_chunk.original_hdr.get_p_filesz());
+		DBGI("Added segment vmaddr %p, memsz %u filesz %u", c_chunk.original_hdr.get_p_vaddr(),
+			 c_chunk.original_hdr.get_p_memsz(), c_chunk.original_hdr.get_p_filesz());
+	}
+	return true;
 }
 
-template <typename ElfHdr, typename ElfPhdr, typename ElfShdr, typename ElfAddr>
-bool ElfBuffer<ElfHdr, ElfPhdr, ElfShdr, ElfAddr>::find_original_segments_pie(Core &coredump)
+template <typename ElfHdr, typename ElfAddr>
+bool ElfBuffer<ElfHdr, ElfAddr>::find_original_segments_pie(Core &coredump)
 {
-    auto elf_hdr = get_elf_header();
-    if (!elf_hdr)
-        return false;
-    
-    unsigned pnum = elf_hdr->e_phnum;
-    unsigned num = coredump.get_phnum<ElfHdr>();
+	auto elf_hdr = get_elf_header();
+	if (!elf_hdr.get_raw_ptr())
+		return false;
 
-    /*  For each original segment we lookup for its dump in the CORE    */
-    ElfPhdr *vphdr = ELF_OFFSET_CAST(ElfPhdr, elf_hdr, elf_hdr->e_phoff);
-    for (int j = 0; j < pnum; j++) {
-        
-        if (vphdr[j].p_type != PT_LOAD)
-            continue;
-        
-        int i = 0;
-        for (i = 0; i < num; i++) {
-            auto entry = coredump.get_phdr_at<ElfHdr>(i);
+	unsigned pnum = elf_hdr.get_e_phnum();
+	unsigned num = coredump.get_phnum<ElfHdr>();
 
-            if (!entry.first && !entry.second) {
-                DBGW("Invalid entry in get_phdr_at");
-                return false;
-            }
+	/*  For each original segment we lookup for its dump in the CORE    */
+	//ElfPhdr *vphdr = ELF_OFFSET_CAST(ElfPhdr, elf_hdr, BYTE_GET(elf_hdr->e_phoff));
+	for (uint j = 0; j < pnum; j++)
+	{
 
-            if (entry.first->p_type != PT_LOAD)
-                continue;
+		auto phdr = elf_hdr.get_phdr_at_index(j);
+		if (phdr.get_p_type() != PT_LOAD)
+			continue;
 
-            if (!(entry.first->p_vaddr <= vphdr[j].p_vaddr + vmaddr_elf_header &&
-                entry.first->p_memsz + entry.first->p_vaddr > vphdr[j].p_vaddr + vmaddr_elf_header)) {
-                    continue;
-                }
+		uint i = 0;
+		for (i = 0; i < num; i++)
+		{
+			auto entry = coredump.get_phdr_at<ElfHdr>(i);
 
-            Elf_phdr_chunk<ElfPhdr> chunk;
-            chunk.data = (void*)((uint8_t*)entry.second + ((ElfAddr)vphdr[j].p_vaddr - (ElfAddr)entry.first->p_vaddr + vmaddr_elf_header ));
-            chunk.core_hdr = entry.first;
-            memcpy(&chunk.original_hdr, &vphdr[j], sizeof(chunk.original_hdr));
+			if (!entry.first && !entry.second)
+			{
+				DBGW("Invalid entry in get_phdr_at");
+				return false;
+			}
 
-            elf_chunks.push_back(chunk);
-            DBGI("Saved chunk[%d] vaddr %p, memsize %u, filesize %u, data @ %p", elf_chunks.size() - 1, chunk.original_hdr.p_vaddr,
-                                chunk.original_hdr.p_memsz, chunk.original_hdr.p_filesz, chunk.data);
-            break;
-            
-        }
-        if (i == num) {
-            DBGW("Segment not found in core image");
-        }
-    }
+			ELF::ElfPHdrClass<ElfHdr> phdr_core(entry.first);
 
-    if (!elf_chunks.size()) {
-        DBGW("No PT_LOAD segments found");
-        return false;
-    }
+			if (phdr_core.get_p_type() != PT_LOAD)
+				continue;
 
-    can_assemble = true;
-    return true;
+			if (!(phdr_core.get_p_vaddr() <= phdr.get_p_vaddr() + vmaddr_elf_header &&
+				  phdr_core.get_p_memsz() + phdr_core.get_p_vaddr() > phdr.get_p_vaddr() + vmaddr_elf_header))
+			{
+				continue;
+			}
+
+			Elf_phdr_chunk<ElfHdr> chunk;
+			chunk.data = (void *)((uint8_t *)entry.second + (phdr.get_p_vaddr() + vmaddr_elf_header - phdr_core.get_p_vaddr()));
+			chunk.core_hdr = phdr_core;
+			chunk.original_hdr = phdr;
+			elf_chunks.push_back(chunk);
+			DBGI("Saved chunk[%d] vaddr %p, memsize %u, filesize %u, data @ %p", elf_chunks.size() - 1, chunk.original_hdr.get_p_vaddr(),
+				 chunk.original_hdr.get_p_memsz(), chunk.original_hdr.get_p_filesz(), chunk.data);
+
+			break;
+		}
+		if (i == num)
+		{
+			DBGW("Segment not found in core image");
+		}
+	}
+
+	if (!elf_chunks.size())
+	{
+		DBGW("No PT_LOAD segments found");
+		return false;
+	}
+
+	can_assemble = true;
+	return true;
 }
 
 template class ElfBuffer<Elf64_Ehdr>;

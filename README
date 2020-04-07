@@ -1,1 +1,9 @@
+1. Full dump
+echo 0xff > /proc/self/coredump_filter
+
+Usage: ./core2elf core_file [OPTIONS]
+Available options:
+   -l, --list              List ELF Headers found in dump
+   -n, --number=N          Reconstruct Nth ELF listed in with --list
+   -o, --output=FILE       Output file name. Default is elf.out
 

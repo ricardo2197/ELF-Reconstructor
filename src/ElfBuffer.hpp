@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "Core.hpp"
+#include "ElfConfig.hpp"
+#include "ElfInternals.hpp"
 
 /*
     Using a std::vector<elfPhdr> to create a list of phdr with assosicated data.
@@ -27,10 +29,10 @@
     Data.
 */
 
-template <typename ElfPhdr>
+template <typename A>
 struct Elf_phdr_chunk {
-    ElfPhdr *core_hdr;
-    ElfPhdr original_hdr;
+    ELF::ElfPHdrClass<A> core_hdr;
+    ELF::ElfPHdrClass<A> original_hdr;
     void *data;
 };
 
@@ -38,11 +40,9 @@ ELF_FUNTION_DECL_T
 class ElfBuffer {
 public:
     ElfBuffer() {};
-    ElfBuffer(bool l, int c): list(l), index(c) {};
+    ElfBuffer(ElfConfig config): m_config(config) {};
     void reconstruct_elf(Core &coredump);
-    ElfHdr* get_elf_header();
-    ElfPhdr* get_phdr_table();
-    void add_phdr_segment(char *data, unsigned len, ElfPhdr *phdr);
+    ELF::ElfHdrClass<ElfHdr> get_elf_header();
     bool find_original_elf_header(Core &coredump);
     bool find_original_segments(Core &coredump);
     bool assemble_elf();
@@ -53,19 +53,26 @@ public:
     template <typename ElfDynamic = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Dyn, Elf32_Dyn>::type>
     bool patch_binary();
 
+    template <typename ElfDynamic = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Dyn, Elf32_Dyn>::type>
+    bool patch_binary_pie();
+    
     template <typename Type>
     void modify_address(ElfAddr address, Type value);
 
 private:
-    std::vector<Elf_phdr_chunk<ElfPhdr> > elf_chunks;
+    std::vector<Elf_phdr_chunk<ElfHdr> > elf_chunks;
     std::vector<uint8_t> elf_hdr_bytes;
     std::vector<uint8_t> elf_buffer;
     bool can_assemble = false;
     bool can_dump = false;
     bool is_pie = false;
+
+    uint64_t base_address = 0x0;
     bool list;
     int index;
     uint64_t vmaddr_elf_header = 0x0;
+    int index_dynamic = -1;
+    ElfConfig m_config;
 };
 
 #endif

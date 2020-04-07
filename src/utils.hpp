@@ -15,12 +15,18 @@
 
 #define ALIGN(x,a)              __ALIGN_MASK(x,(typeof(x))(a)-1)
 #define __ALIGN_MASK(x,mask)    (((x)+(mask))&~(mask))
+#define ALIGN_UP(addr, align)   ( ((addr) + (align) - 1) & (~((align) - 1)) )
 #define ELF_CAST(type, base) (ELF_OFFSET_CAST(type, base, 0))
 #define ELF_OFFSET_CAST(type, base, offset) (type*)((uint8_t*)base + offset)
+#define ADDR2ELF(addr, index)	addr + sizeof(addr) * index
 
-#define ELF_FUNTION_DECL_T template <typename ElfHdr, \
+#define ELF_STRUCT_DECL_T template <typename ElfHdr, \
     typename ElfPhdr = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Phdr, Elf32_Phdr>::type, \
     typename ElfShdr = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Shdr, Elf32_Shdr>::type,  \
+	typename ElfDynamic = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Dyn, Elf32_Dyn>::type, \
+	typename ElfAddr = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Addr, Elf32_Addr>::type >
+
+#define ELF_FUNTION_DECL_T template <typename ElfHdr, \
 	typename ElfAddr = typename std::conditional< std::is_same<ElfHdr, Elf64_Ehdr>::value, Elf64_Addr, Elf32_Addr>::type >
 
 #define ERRNO_SUCCESS 		0
@@ -29,5 +35,7 @@
 #define ERRNO_MMAP		 	3
 #define ERRNO_NOMEM			4
 #define ERRNO_INVALIDELF	5
+
+
 
 #endif
